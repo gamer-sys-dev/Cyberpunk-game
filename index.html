@@ -36,8 +36,8 @@
             action: { x: 720, y: 520, r: 45, label: "ACT", key: "Enter" }, jump: { x: 720, y: 520, r: 45, label: "JMP", key: "Space" },
             menuU: { x: 740, y: 40, w: 50, h: 40, label: "UPG", key: "KeyU" }, menuI: { x: 10, y: 40, w: 50, h: 40, label: "INV", key: "KeyI" }
         },
-        isHitCircle: function(tx, ty, btn) { const dx = tx - btn.x; const dy = ty - btn.y; return (dx * dx + dy * dy) <= (btn.r * btn.r * 1.5); },
-        isHitRect: function(tx, ty, btn) { return tx >= btn.x && tx <= btn.x + btn.w && ty >= btn.y && ty <= btn.y + btn.h; },
+        isHitCircle: function(tx, ty, btn) { const dx = tx - btn.x; const dy = ty - btn.y; return (dx * dx + dy * dy) <= (btn.r * btn.r * 2.0); }, // Increased forgiveness
+        isHitRect: function(tx, ty, btn) { return tx >= btn.x - 20 && tx <= btn.x + btn.w + 20 && ty >= btn.y - 20 && ty <= btn.y + btn.h + 20; },
         draw: function(ctx, state) {
             ctx.save(); ctx.lineWidth = 2; ctx.font = '16px Courier New'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
             const drawBtn = (b) => {
@@ -64,6 +64,171 @@
         }
         keys[e.code] = true; keys[e.key.toUpperCase()] = true; 
     });
+    window.addEventListener('keyup', e => { keys[e.code] = false; keys[e.key.toUpperCase()] = false; });
+    
+    mobileInput.addEventListener('input', e => { if (gameState === 'CHARACTER_CREATION') player.name = mobileInput.value.toUpperCase().slice(0, 15); });
+    mobileInput.addEventListener('keyup', e => { if (gameState === 'CHARACTER_CREATION' && e.key === 'Enter' && player.name.trim().length > 0) { player.name = player.name.trim().toUpperCase(); mobileInput.blur(); gameState = 'AMULET_SELECTION'; postAmuletState = 'STORY_INTRO'; } });
+
+    // Corrected Touch Math mapping container size to actual drawn canvas bounds
+    function handleTouch(e, isDown) {
+        if (gameState !== 'CHARACTER_CREATION') e.preventDefault();
+        const rect = canvas.getBoundingClientRect(); 
+        
+        // Calculate true scaling factor resolving CSS object-fit: contain
+        const scale = Math.min(rect.width / 800, rect.height / 600);
+        const offsetX = (rect.width - (800 * scale)) / 2;
+        const offsetY = (rect.height - (600 * scale)) / 2;
+
+        for (let i = 0; i < e.changedTouches.length; i++) {
+            const touch = e.changedTouches[i]; 
+            const tx = (touch.clientX - rect.left - offsetX) / scale;
+            const ty = (touch.clientY - rect.top - offsetY) / scale;
+            const id = touch.identifier;
+            
+            if (gameState === 'CHARACTER_CREATION') { if(isDown) mobileInput.focus(); continue; }
+            
+            let hitKey = null;
+
+            if (gameState === 'EXPLORE') {
+                if (vPad.isHitCircle(tx, ty, vPad.buttons.left)) hitKey = 'ArrowLeft'; 
+                else if (vPad.isHitCircle(tx, ty, vPad.buttons.right)) hitKey = 'ArrowRight'; 
+                else if (vPad.isHitCircle(tx, ty, vPad.buttons.jump)) hitKey = 'Space'; 
+                else if (vPad.isHitRect(tx, ty, vPad.buttons.menuU)) hitKey = 'KeyU'; 
+                else if (vPad.isHitRect(tx, ty, vPad.buttons.menuI)) hitKey = 'KeyI';
+            } 
+            else if (['COMBAT', 'UPGRADE_MENU', 'INVENTORY_MENU', 'AMULET_SELECTION'].includes(gameState)) {
+                if (vPad.isHitCircle(tx, ty, vPad.buttons.up)) hitKey = 'ArrowUp'; 
+                else if (vPad.isHitCircle(tx, ty, vPad.buttons.down)) hitKey = 'ArrowDown'; 
+                else if (vPad.isHitCircle(tx, ty, vPad.buttons.action) || tx > 400) hitKey = 'Enter'; // Massive right-screen hitzone
+            } 
+            else if (gameState === 'TOURNAMENT_LOBBY') {
+                if (vPad.isHitRect(tx, ty, vPad.buttons.menuU)) hitKey = 'KeyU'; 
+                else if (vPad.isHitRect(tx, ty, vPad.buttons.menuI)) hitKey = 'KeyI';
+                else if (tx > 600 && ty > 400) hitKey = 'KeyR';
+                else hitKey = 'Enter'; // Tap anywhere else to start
+            }
+            else if (gameState === 'BOSS_PROMPT') {
+                if (tx < 400) hitKey = 'Y'; else hitKey = 'N'; 
+            }
+            else {
+                hitKey = 'Enter'; // Tap absolutely anywhere to continue dialogue/chests
+            }
+
+            if (isDown && hitKey) { keys[hitKey] = true; vPad.activeTouches[id] = hitKey; } 
+            else if (!isDown && vPad.activeTouches[id]) { keys[vPad.activeTouches[id]] = false; delete vPad.activeTouches[id]; }
+        }
+    }
+    canvas.addEventListener('touchstart', e => handleTouch(e, true), { passive: false });
+    canvas.addEventListener('touchend', e => handleTouch(e, false));
+    canvas.addEventListener('touchcancel', e => handleTouch(e, false));
+
+    const player = {
+        name: "", x: 150, y: 450, baseY: 450, vy: 0, isJumping: false, speed: 200, color: '#00ffcc',
+        level: 1, xp: 0, nextLevelXp: 100, skillPoints: 0, stats: { str: 5, vit: 5, tech: 5, spd: 5 },
+        hp: 100, maxHp: 100, mp: 50, maxMp: 50, atb: 0, maxAtb: 100, speedStat: 30, baseDamage: 10, magicDamage: 15,
+        distanceTraveled: 0, isMoving: false, xpMultiplier: 1, inventory: [], gear: { weapon: null, armor: null, shoes: null, accessory: null }, 
+        amulet: [], pet: null, activeCurse: null, activeBlessing: null,
+        updateDerivedStats: function() {
+            const g = this.gear; let bStr = g.weapon?.bonusStr || 0; let bTech = g.weapon?.bonusTech || 0;
+            let pXp = this.pet?.multXp || 1, pStr = this.pet?.multStr || 1, pTech = this.pet?.multTech || 1, pSpd = this.pet?.multSpd || 1, pHp = this.pet?.multHp || 1;
+            let mHp = (g.armor?.multHp || 1) * (g.accessory?.multHp || 1) * pHp; let mSpd = (g.shoes?.multSpd || 1) * (g.accessory?.multSpd || 1) * pSpd;
+            let mStr = (g.weapon?.multStr || 1) * (g.accessory?.multStr || 1) * pStr; let mTech = (g.weapon?.multTech || 1) * (g.accessory?.multTech || 1) * pTech;
+            let mXp = (g.accessory?.multXp || 1) * pXp;
+            let amXp = 1, amStr = 1, amTech = 1, amSpd = 1;
+            this.amulet.forEach(gem => { if (gem === 'XP') amXp *= 10; if (gem === 'STR') amStr *= 2; if (gem === 'TECH') amTech *= 2; if (gem === 'SPD') amSpd *= 2; });
+            let tempHp = 1, tempSpd = 1, tempStr = 1, tempTech = 1;
+            if (this.activeBlessing === 'TITAN_HEALTH') tempHp = 50; if (this.activeBlessing === 'HYPER_SPEED') tempSpd = 50; if (this.activeBlessing === 'OMEGA_STRENGTH') tempStr = 50; if (this.activeBlessing === 'QUANTUM_MAGIC') tempTech = 50;
+            this.xpMultiplier = mXp * amXp; let autoLevelBonusHp = (this.level - 1) * 20; let autoLevelBonusMp = (this.level - 1) * 10; 
+            this.maxHp = Math.floor((50 + autoLevelBonusHp + (this.stats.vit * 10)) * mHp * tempHp); this.maxMp = Math.floor(25 + autoLevelBonusMp + ((this.stats.tech + bTech) * 5));
+            this.speedStat = Math.floor((15 + (this.stats.spd * 3)) * mSpd * amSpd * tempSpd); this.baseDamage = Math.floor(((this.stats.str + bStr) * 2) * mStr * amStr * tempStr); this.magicDamage = Math.floor(((this.stats.tech + bTech) * 3) * mTech * amTech * tempTech);
+            if (this.activeBlessing === 'TITAN_HEALTH') this.hp = this.maxHp; else if (this.hp > this.maxHp) this.hp = this.maxHp; 
+            if (this.mp > this.maxMp) this.mp = this.maxMp;
+        }
+    };
+
+    let cameraX = 0; const rain = Array.from({length: 100}, () => ({ x: Math.random() * 800, y: Math.random() * 600, speed: 300 + Math.random() * 200, length: 10 + Math.random() * 20 }));
+    let entities = []; let enemy = null; let fallbackEnemy = { name: 'Construct', hp: 60, maxHp: 60, atb: 0, maxAtb: 100, speedStat: 20, color: '#ff0055', entranceQuote: 'Target locked.', attackQuote: 'Attack.' };
+    const combat = { menuIndex: 0, options: ['Attack', 'Magic (Cost 10)', '✨ AI Hack (Cost 20)'], turnState: 'FILLING', message: '', messageTimer: 0, particles: [], freezeTimer: 0 };
+    const upgradeMenu = { index: 0, options: ['str', 'vit', 'tech', 'spd', 'exit'], labels: ['STR (Physical Dmg)', 'VIT (Max HP)', 'TECH (Magic Dmg)', 'SPD (ATB Speed)', 'RETURN'] };
+    const amuletMenu = { index: 0, options: [{ id: 'XP', label: 'Sapphire (10x XP)' }, { id: 'STR', label: 'Ruby (2x STR)' }, { id: 'TECH', label: 'Topaz (2x TECH)' }, { id: 'SPD', label: 'Emerald (2x SPD)' }] };
+    const inventoryMenu = { index: 0 };
+    const cursesList = ['BLURRED_VISION', 'SYSTEM_FREEZE', 'MINIATURIZED', 'GLITCH_DANCE']; const blessingsList = ['OMEGA_STRENGTH', 'HYPER_SPEED', 'QUANTUM_MAGIC', 'TITAN_HEALTH'];
+    const petList = [ { name: 'Neon-Hound', multStr: 1.5, multSpd: 1.2, multHp: 1, multTech: 1, multXp: 1 }, { name: 'Cyber-Feline', multTech: 1.5, multSpd: 1.5, multHp: 1, multStr: 1, multXp: 1 }, { name: 'Plasma-Turtle', multHp: 2.0, multTech: 1.2, multStr: 1, multSpd: 1, multXp: 1 }, { name: 'Data-Owl', multXp: 2.0, multTech: 1.5, multHp: 1, multStr: 1, multSpd: 1 } ];
+    let storyText = "SYSTEM BOOT.\nLocation: Hemsworth Quarantine Zone.\nDirective: Escape the neon slums, find companions, and defeat the Omega Construct.\n\n[TAP 'CONTINUE' TO WAKE UP]";
+    let postCombatMessage = "";
+
+    async function fetchWithRetry(url, options, retries = 3) {
+        const delays = [1000, 2000, 4000];
+        for (let i = 0; i < retries; i++) { try { const response = await fetch(url, options); if (!response.ok) throw new Error(`HTTP error ${response.status}`); return await response.json(); } catch (error) { if (i === retries - 1) throw error; await new Promise(res => setTimeout(res, delays[i])); } }
+    }
+    const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+    async function fetchDynamicEnemy(level, type) {
+        let prompt = `Generate a cyberpunk enemy for player level ${level}. Provide name, maxHp, speedStat, neon colorHex, short entrance taunt, short attack quote. JSON format.`;
+        if (type === 'BOSS') prompt = `Generate a terrifying cyberpunk BOSS enemy. Provide an intimidating name, huge maxHp (scale for level ${level} boss), speedStat, intense neon colorHex, menacing entrance taunt, crushing attack quote. JSON format.`; 
+        else if (type === 'PET') prompt = `Generate a feral robotic cyberpunk animal/pet. Provide name, maxHp, speedStat, bright neon colorHex, animalistic entrance taunt, animal attack quote. JSON format.`;
+        else if (type === 'TOURNAMENT') prompt = `Generate a cyberpunk gladiator/arena fighter. Provide an ego-driven name, maxHp, speedStat, flashy neon colorHex, showboating entrance taunt, flashy attack quote. JSON format.`;
+        try { const data = await fetchWithRetry(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { name: { type: "STRING" }, maxHp: { type: "INTEGER" }, speedStat: { type: "INTEGER" }, colorHex: { type: "STRING" }, entranceQuote: { type: "STRING" }, attackQuote: { type: "STRING" } }, required: ["name", "maxHp", "speedStat", "colorHex", "entranceQuote", "attackQuote"] } } }) }); return JSON.parse(data.candidates[0].content.parts[0].text); } catch (e) { return null; }
+    }
+
+    async function fetchAIHack(enemyName) {
+        const prompt = `Describe a cinematic 1-sentence cyberpunk hack against ${enemyName}. Return JSON with description and damage (40-80).`;
+        try { const data = await fetchWithRetry(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { description: { type: "STRING" }, damage: { type: "INTEGER" } }, required: ["description", "damage"] } } }) }); return JSON.parse(data.candidates[0].content.parts[0].text); } catch (e) { return { description: "System override sequence initiated.", damage: 50 }; }
+    }
+
+    async function fetchNextStoryBeat(defeatedEnemy, type) {
+        let prompt = `You are a narrator for a cyberpunk game. The rogue AI player named ${player.name} just defeated a ${defeatedEnemy}. Write 2 short, gritty sentences describing ${player.name} moving deeper into the neon environment. Return JSON with 'story'.`;
+        if (type === 'BOSS') prompt = `You are a narrator. The player named ${player.name} just defeated a major BOSS named ${defeatedEnemy}. Write a cinematic, 3-sentence narrative chapter describing a massive shift in the city's environment. Return JSON with 'story'.`; 
+        else if (type === 'PET') prompt = `Narrate how the wild robotic pet ${defeatedEnemy} submits to the player ${player.name} and joins their party. 2 short sentences. Return JSON with 'story'.`;
+        try { const data = await fetchWithRetry(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { story: { type: "STRING" } }, required: ["story"] } } }) }); return JSON.parse(data.candidates[0].content.parts[0].text).story; } catch (e) { return `${player.name} stands victorious. The journey continues.`; }
+    }
+
+    function wrapText(text, x, y, maxWidth, lineHeight) {
+        if (!text) return; 
+        const paragraphs = String(text).split('\n'); let currentY = y;
+        for (let p = 0; p < paragraphs.length; p++) {
+            const words = paragraphs[p].split(' '); let line = '';
+            for(let n = 0; n < words.length; n++) {
+                const testLine = line + words[n] + ' ';
+                if (ctx.measureText(testLine).width > maxWidth && n > 0) { ctx.fillText(line, x, currentY); line = words[n] + ' '; currentY += lineHeight; } 
+                else { line = testLine; }
+            }
+            ctx.fillText(line, x, currentY); currentY += lineHeight + (lineHeight * 0.5);
+        }
+    }
+
+    function createParticle(x, y, text, color) { combat.particles.push({ x, y, text, color, life: 1.0, velocityY: -50 }); }
+
+    function generateChestLoot() {
+        const slots = ['weapon', 'armor', 'shoes', 'accessory']; const slot = slots[Math.floor(Math.random() * slots.length)];
+        let item = { name: "", slot: slot, bonusStr: 0, bonusTech: 0, multHp: 1, multSpd: 1, multXp: 1, multStr: 1, multTech: 1 };
+        if (slot === 'weapon') {
+            item.name = ["Plasma", "Neon", "Quantum"][Math.floor(Math.random()*3)] + " " + ["Blade", "Rifle", "Deck"][Math.floor(Math.random()*3)];
+            if(Math.random() > 0.5) item.bonusStr = Math.floor(Math.random() * 10) + player.level * 2; else item.bonusTech = Math.floor(Math.random() * 10) + player.level * 2;
+            if(Math.random() > 0.9) item.multStr = 2.0; 
+        } else if (slot === 'armor') { item.name = ["Titanium", "Aegis", "Kevlar"][Math.floor(Math.random()*3)] + " Chassis"; item.multHp = 1.0 + (Math.floor(Math.random() * 10) * 0.1); 
+        } else if (slot === 'shoes') { item.name = ["Hermes", "Sonic", "Aero"][Math.floor(Math.random()*3)] + " Treads"; item.multSpd = 1.0 + (Math.floor(Math.random() * 5) * 0.2); 
+        } else if (slot === 'accessory') {
+            item.name = ["Logic", "Data", "Matrix"][Math.floor(Math.random()*3)] + " Core";
+            const roll = Math.random();
+            if(roll > 0.6) item.multXp = [2, 3, 10][Math.floor(Math.random()*3)]; else if(roll > 0.3) { item.multStr = 2.0; item.multTech = 2.0; } else { item.multHp = 2.0; item.multSpd = 2.0; }
+        }
+        return item;
+    }
+
+    function formatItemStats(item) {
+        if (!item) return "NONE"; let stats = [];
+        if (item.bonusStr > 0) stats.push(`+${item.bonusStr} STR`); if (item.bonusTech > 0) stats.push(`+${item.bonusTech} TECH`);
+        if (item.multHp > 1) stats.push(`x${item.multHp.toFixed(1)} HP`); if (item.multSpd > 1) stats.push(`x${item.multSpd.toFixed(1)} SPD`);
+        if (item.multStr > 1) stats.push(`x${item.multStr.toFixed(1)} STR`); if (item.multTech > 1) stats.push(`x${item.multTech.toFixed(1)} TECH`);
+        if (item.multXp > 1) stats.push(`x${item.multXp} XP`);
+        return stats.join(", ");
+    }
+
+    function spawnEntity() {
+        if (Math.random() < 0.035) { 
+            const rand = Math.random();
+            if (currentStage === 1 && rand < 0.25) entities.push({ globalX: cameraX + 900, y: 400, w: 20, h: 50, type: 'CURSE', acti    });
     window.addEventListener('keyup', e => { keys[e.code] = false; keys[e.key.toUpperCase()] = false; });
     mobileInput.addEventListener('input', e => { if (gameState === 'CHARACTER_CREATION') player.name = mobileInput.value.toUpperCase().slice(0, 15); });
     mobileInput.addEventListener('keyup', e => { if (gameState === 'CHARACTER_CREATION' && e.key === 'Enter' && player.name.trim().length > 0) { player.name = player.name.trim().toUpperCase(); mobileInput.blur(); gameState = 'AMULET_SELECTION'; postAmuletState = 'STORY_INTRO'; } });
